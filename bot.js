@@ -42,17 +42,30 @@ const PLATFORM_NAME_FORMAT = /^[a-zA-Z]+\d+$/;
 // Platform ដែលបានចុះឈ្មោះ (ផ្ទុកក្នុង Memory ជា cache, sync ជាមួយ MongoDB)
 let registeredPlatforms = new Set();
 
+// Platform របស់ User ម្នាក់ៗ (userId -> string[] តាមលំដាប់ចុះឈ្មោះ)
+let userPlatforms = new Map();
+
 // ផ្ទុកសម័យធ្វើការនីមួយៗ តាម chatId + userId
 // { platform, count, active, startedAt }
 const sessions = new Map();
+
+// ផ្ទុកសម័យរបាយការណ៍ /sum តាម chatId + userId
+// { startDate, platforms: string[], index, currentCount, results: { [platform]: count } }
+const sumSessions = new Map();
 
 function getSessionKey(chatId, userId) {
   return `${chatId}_${userId}`;
 }
 
+// ថ្ងៃខែឆ្នាំតាមម៉ោងកម្ពុជា ជាទម្រង់ YYYY-MM-DD (ប្រើកាលបរិច្ឆេទចាប់ផ្តើមវេន មិនមែនកាលបរិច្ឆេទវាយ /done ទេ)
+function formatShiftDate(date) {
+  return date.toLocaleDateString('en-CA', { timeZone: 'Asia/Phnom_Penh' });
+}
+
 // ----- /add <platform> → ចុះឈ្មោះ Platform ថ្មី -----
 bot.onText(/^\/add(?:@\w+)?\s+(\S+)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
+  const userId = msg.from.id;
   const rawName = match[1].toLowerCase().replace(/^\//, '');
 
   if (!PLATFORM_NAME_FORMAT.test(rawName)) {
@@ -66,13 +79,22 @@ bot.onText(/^\/add(?:@\w+)?\s+(\S+)$/i, async (msg, match) => {
   }
 
   try {
-    await db.addPlatform(rawName);
+    await db.addPlatform(userId, rawName);
     registeredPlatforms.add(rawName);
+
+    const uid = String(userId);
+    if (!userPlatforms.has(uid)) {
+      userPlatforms.set(uid, []);
+    }
+    if (!userPlatforms.get(uid).includes(rawName)) {
+      userPlatforms.get(uid).push(rawName);
+    }
 
     bot.sendMessage(
       chatId,
-      `✅ បានចុះឈ្មោះ Platform *${rawName.toUpperCase()}* រួចរាល់!\n` +
-        `👉 ឥឡូវប្រើ /${rawName} ដើម្បីចាប់ផ្តើមវេនការងារបាន`,
+      `✅ បានចុះឈ្មោះ Platform *${rawName.toUpperCase()}* សម្រាប់អ្នករួចរាល់!\n` +
+        `👉 ប្រើ /${rawName} ដើម្បីចាប់ផ្តើមវេនការងារតែមួយ Platform នេះ\n` +
+        `👉 ឬប្រើ /sum ដើម្បីធ្វើរបាយការណ៍សរុបគ្រប់ Platform ដែលអ្នកបានចុះឈ្មោះ`,
       { parse_mode: 'Markdown' }
     );
   } catch (err) {
@@ -103,7 +125,11 @@ bot.onText(/^\/remove(?:@\w+)?\s+(\S+)$/i, async (msg, match) => {
   try {
     await db.removePlatform(rawName);
     registeredPlatforms.delete(rawName);
-    bot.sendMessage(chatId, `🗑️ បានលុប Platform *${rawName.toUpperCase()}* ចេញរួចរាល់`, {
+    for (const list of userPlatforms.values()) {
+      const idx = list.indexOf(rawName);
+      if (idx !== -1) list.splice(idx, 1);
+    }
+    bot.sendMessage(chatId, `🗑️ បានលុប Platform *${rawName.toUpperCase()}* ចេញរួចរាល់ (គ្រប់ User)`, {
       parse_mode: 'Markdown',
     });
   } catch (err) {
@@ -130,17 +156,123 @@ bot.onText(/^\/list$/, (msg) => {
   bot.sendMessage(chatId, `📋 Platform ដែលបានចុះឈ្មោះ៖\n${list}`);
 });
 
+// ----- /sum → ចាប់ផ្តើមរបាយការណ៍សរុបវេន (គ្រប់ Platform ដែលបានចុះឈ្មោះ តាមលំដាប់) -----
+bot.onText(/^\/sum$/, (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const key = getSessionKey(chatId, userId);
+
+  const platforms = [...(userPlatforms.get(String(userId)) || [])];
+
+  if (platforms.length === 0) {
+    bot.sendMessage(
+      chatId,
+      '⚠️ អ្នកមិនទាន់ចុះឈ្មោះ Platform ណាមួយទេ។ សូម /add platform ជាមុនសិន (ឧ. /add s98)'
+    );
+    return;
+  }
+
+  sumSessions.set(key, {
+    startDate: formatShiftDate(new Date()),
+    platforms,
+    index: 0,
+    currentCount: 0,
+    results: {},
+    finished: false,
+  });
+
+  bot.sendMessage(
+    chatId,
+    `🧾 ចាប់ផ្តើមរបាយការណ៍សរុបវេន (/sum)\n\n` +
+      `📩 សូម Forward សារសម្រាប់ Platform *${platforms[0].toUpperCase()}*\n` +
+      `⏭️ ចប់ Platform នេះ ហើយចង់ទៅ Platform បន្ទាប់ សូមវាយ /next\n` +
+      `🏁 ចប់ Platform ចុងក្រោយ ហើយចង់បានលទ្ធផលសរុប សូមវាយ /done`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ----- /next → ចប់ Platform បច្ចុប្បន្ន ហើយទៅ Platform បន្ទាប់ (ក្នុងវេន /sum) -----
+bot.onText(/^\/next$/, (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const key = getSessionKey(chatId, userId);
+  const sumSession = sumSessions.get(key);
+
+  if (!sumSession) {
+    bot.sendMessage(chatId, '⚠️ អ្នកមិនទាន់ចាប់ផ្តើម /sum ទេ។ សូមវាយ /sum ជាមុនសិន');
+    return;
+  }
+
+  if (sumSession.finished) {
+    bot.sendMessage(
+      chatId,
+      '⚠️ គ្មាន Platform បន្ទាប់ទៀតទេ (ចប់ Platform ចុងក្រោយរួចហើយ)\n🏁 សូមវាយ /done ដើម្បីទទួលបានលទ្ធផលសរុប'
+    );
+    return;
+  }
+
+  const finishedPlatform = sumSession.platforms[sumSession.index];
+  sumSession.results[finishedPlatform] = sumSession.currentCount;
+  sumSession.currentCount = 0;
+
+  const isLastPlatform = sumSession.index === sumSession.platforms.length - 1;
+
+  if (isLastPlatform) {
+    sumSession.finished = true;
+    bot.sendMessage(
+      chatId,
+      `✅ ចប់ Platform *${finishedPlatform.toUpperCase()}* (${sumSession.results[finishedPlatform]} សារ)\n\n` +
+        `⚠️ នេះជា Platform ចុងក្រោយហើយ គ្មាន Platform បន្ទាប់ទៀតទេ\n` +
+        `🏁 សូមវាយ /done ដើម្បីទទួលបានលទ្ធផលសរុប`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  sumSession.index += 1;
+  const nextPlatform = sumSession.platforms[sumSession.index];
+  bot.sendMessage(
+    chatId,
+    `✅ ចប់ Platform *${finishedPlatform.toUpperCase()}* (${sumSession.results[finishedPlatform]} សារ)\n\n` +
+      `📩 សូម Forward សារសម្រាប់ Platform *${nextPlatform.toUpperCase()}*\n` +
+      `⏭️ ចប់ Platform នេះ សូមវាយ /next (ឬ /done បើនេះជា Platform ចុងក្រោយ)`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
 // ----- /done → បញ្ចប់វេនការងារ -----
 bot.onText(/^\/done$/, (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const key = getSessionKey(chatId, userId);
+
+  // បើកំពុងធ្វើរបាយការណ៍ /sum → គណនាសរុបគ្រប់ Platform ហើយបញ្ចប់
+  const sumSession = sumSessions.get(key);
+  if (sumSession) {
+    // បើមិនទាន់ /next ចប់ Platform បច្ចុប្បន្នទេ (រួមទាំង Platform ចុងក្រោយ) → កត់ត្រាចំនួនបច្ចុប្បន្នផងជាចុងក្រោយ
+    if (!sumSession.finished) {
+      const currentPlatform = sumSession.platforms[sumSession.index];
+      sumSession.results[currentPlatform] = sumSession.currentCount;
+    }
+
+    const lines = sumSession.platforms.map(
+      (p) => `${p.toUpperCase()}: ${sumSession.results[p] ?? 0}`
+    );
+    const total = sumSession.platforms.reduce((sum, p) => sum + (sumSession.results[p] ?? 0), 0);
+
+    bot.sendMessage(chatId, `${sumSession.startDate}\n${lines.join('\n')}\nTotal: ${total}`);
+
+    sumSessions.delete(key);
+    return;
+  }
+
+  // ចាស់៖ វេនការងារ Platform តែមួយ (ចាប់ផ្តើមតាម command platform ដោយផ្ទាល់ ឧ. /s98)
   const session = sessions.get(key);
 
   if (!session || !session.active) {
     bot.sendMessage(
       chatId,
-      '⚠️ អ្នកមិនទាន់ចាប់ផ្តើមវេនការងារទេ។ សូមវាយ platform command ជាមុនសិន (ឧ. /wc777)។ ' +
+      '⚠️ អ្នកមិនទាន់ចាប់ផ្តើមវេនការងារទេ។ សូមវាយ platform command ជាមុនសិន (ឧ. /wc777) ឬ /sum។ ' +
         'បើមិនទាន់ចុះឈ្មោះ Platform សូមប្រើ /add wc777'
     );
     return;
@@ -162,6 +294,14 @@ bot.onText(/^\/cancel$/, (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const key = getSessionKey(chatId, userId);
+
+  const sumSession = sumSessions.get(key);
+  if (sumSession) {
+    sumSessions.delete(key);
+    bot.sendMessage(chatId, '🚫 បានបោះបង់របាយការណ៍ /sum ទាំងមូល (មិនរាប់ចំនួនសារទេ)');
+    return;
+  }
+
   const session = sessions.get(key);
 
   if (!session || !session.active) {
@@ -179,32 +319,34 @@ bot.onText(/^\/cancel$/, (msg) => {
 
 // ----- Generic handler: platform-start commands + message counting -----
 bot.on('message', (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const key = getSessionKey(chatId, userId);
+
   if (!msg.text) {
     // Photo/Video/Sticker គ្មាន text → ធ្លាក់ចូល logic រាប់សារខាងក្រោម
   } else {
-    // /add /remove /list /done /cancel ត្រូវបានចាប់ដោយ onText រួចហើយ
-    if (/^\/(add|remove|list|done|cancel)(\s|@|$)/i.test(msg.text)) {
+    // /add /remove /list /done /cancel /sum /next ត្រូវបានចាប់ដោយ onText រួចហើយ
+    if (/^\/(add|remove|list|done|cancel|sum|next)(\s|@|$)/i.test(msg.text)) {
       return;
     }
 
-    // ពិនិត្យថាតើសារនេះជា command ចាប់ផ្តើម platform ដែលបានចុះឈ្មោះឬអត់
+    // ពិនិត្យថាតើសារនេះជា command ចាប់ផ្តើម platform ដែលបានចុះឈ្មោះឬអត់ (ប្រើតែពេលមិននៅក្នុងវេន /sum)
     const cmdMatch = msg.text.match(/^\/([a-zA-Z]+\d+)(?:@\w+)?$/);
-    if (cmdMatch) {
+    if (cmdMatch && !sumSessions.has(key)) {
       const platform = cmdMatch[1].toLowerCase();
-      const chatId = msg.chat.id;
-      const userId = msg.from.id;
+      const ownPlatforms = userPlatforms.get(String(userId)) || [];
 
-      if (!registeredPlatforms.has(platform)) {
+      if (!ownPlatforms.includes(platform)) {
         bot.sendMessage(
           chatId,
-          `⚠️ Platform *${platform.toUpperCase()}* មិនទាន់ចុះឈ្មោះទេ។\n` +
+          `⚠️ Platform *${platform.toUpperCase()}* មិនទាន់ចុះឈ្មោះសម្រាប់អ្នកទេ។\n` +
             `សូមចុះឈ្មោះជាមុនសិនដោយប្រើ៖ /add ${platform}`,
           { parse_mode: 'Markdown' }
         );
         return;
       }
 
-      const key = getSessionKey(chatId, userId);
       sessions.set(key, {
         platform,
         count: 0,
@@ -223,10 +365,14 @@ bot.on('message', (msg) => {
     }
   }
 
-  // ----- រាប់សារ បើមានវេនកំពុងធ្វើការ -----
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  const key = getSessionKey(chatId, userId);
+  // ----- បើកំពុងធ្វើរបាយការណ៍ /sum → រាប់សារចូល Platform បច្ចុប្បន្ន -----
+  const sumSession = sumSessions.get(key);
+  if (sumSession && !sumSession.finished) {
+    sumSession.currentCount += 1;
+    return;
+  }
+
+  // ----- រាប់សារ បើមានវេនការងារ Platform តែមួយកំពុងធ្វើ -----
   const session = sessions.get(key);
 
   if (session && session.active) {
@@ -248,8 +394,12 @@ app.get('/', (req, res) => {
 // ----- Startup: ភ្ជាប់ MongoDB → ទាញ Platform → បើក Server → កំណត់ Webhook -----
 async function start() {
   await db.connect(mongoUri);
-  registeredPlatforms = await db.loadPlatforms();
-  console.log(`📋 ទាញយក Platform ចំនួន ${registeredPlatforms.size} ពី MongoDB`);
+  const loaded = await db.loadPlatforms();
+  registeredPlatforms = loaded.registeredPlatforms;
+  userPlatforms = loaded.userPlatforms;
+  console.log(
+    `📋 ទាញយក Platform ចំនួន ${registeredPlatforms.size} ពី MongoDB (User ${userPlatforms.size} នាក់)`
+  );
 
   app.listen(port, () => {
     console.log(`🚀 Server កំពុងស្តាប់នៅ port ${port}`);
