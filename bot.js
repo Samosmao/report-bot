@@ -49,6 +49,15 @@ function savePlatforms(platformSet) {
 
 const registeredPlatforms = loadPlatforms();
 
+// Admin ដែលមានសិទ្ធិគ្រប់គ្រង Platform (/remove, /list)
+const ADMIN_IDS = (process.env.ADMIN_IDS || '1908211979')
+  .split(',')
+  .map((id) => id.trim());
+
+function isAdmin(userId) {
+  return ADMIN_IDS.includes(String(userId));
+}
+
 // ទម្រង់ platform name ត្រូវការ៖ អក្សរ (មួយ ឬច្រើន) + លេខ ឧ. e98, wc777, ct777, zs777
 const PLATFORM_NAME_FORMAT = /^[a-zA-Z]+\d+$/;
 
@@ -86,9 +95,16 @@ bot.onText(/^\/add(?:@\w+)?\s+(\S+)$/i, (msg, match) => {
   );
 });
 
-// ----- /remove <platform> → លុប Platform ចេញ -----
+// ----- /remove <platform> → លុប Platform ចេញ (Admin ប៉ុណ្ណោះ) -----
 bot.onText(/^\/remove(?:@\w+)?\s+(\S+)$/i, (msg, match) => {
   const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  if (!isAdmin(userId)) {
+    bot.sendMessage(chatId, '⛔ មានតែ Admin ប៉ុណ្ណោះទើបអាចប្រើ /remove បាន');
+    return;
+  }
+
   const rawName = match[1].toLowerCase().replace(/^\//, '');
 
   if (!registeredPlatforms.has(rawName)) {
@@ -105,9 +121,16 @@ bot.onText(/^\/remove(?:@\w+)?\s+(\S+)$/i, (msg, match) => {
   });
 });
 
-// ----- /list → មើលបញ្ជី Platform ទាំងអស់ -----
+// ----- /list → មើលបញ្ជី Platform ទាំងអស់ (Admin ប៉ុណ្ណោះ) -----
 bot.onText(/^\/list$/, (msg) => {
   const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  if (!isAdmin(userId)) {
+    bot.sendMessage(chatId, '⛔ មានតែ Admin ប៉ុណ្ណោះទើបអាចប្រើ /list បាន');
+    return;
+  }
+
   if (registeredPlatforms.size === 0) {
     bot.sendMessage(chatId, 'បញ្ជី Platform នៅទទេ។ សូមចុះឈ្មោះជាមួយ /add wc777');
     return;
@@ -143,13 +166,33 @@ bot.onText(/^\/done$/, (msg) => {
   sessions.delete(key);
 });
 
+// ----- /cancel → បោះបង់វេនកំពុងធ្វើបច្ចុប្បន្ន (មិនរាប់ចំនួនសារ) -----
+bot.onText(/^\/cancel$/, (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const key = getSessionKey(chatId, userId);
+  const session = sessions.get(key);
+
+  if (!session || !session.active) {
+    bot.sendMessage(chatId, '⚠️ គ្មានវេនកំពុងធ្វើការទេ ដូច្នេះគ្មានអ្វីត្រូវបោះបង់ទេ។');
+    return;
+  }
+
+  sessions.delete(key);
+  bot.sendMessage(
+    chatId,
+    `🚫 បានបោះបង់វេនការងារលើ Platform *${session.platform.toUpperCase()}* រួចរាល់ (មិនរាប់ចំនួនសារទេ)`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
 // ----- Generic handler: platform-start commands + message counting -----
 bot.on('message', (msg) => {
   if (!msg.text) {
     // Photo/Video/Sticker គ្មាន text → ធ្លាក់ចូល logic រាប់សារខាងក្រោម
   } else {
-    // /add /remove /list /done ត្រូវបានចាប់ដោយ onText រួចហើយ
-    if (/^\/(add|remove|list|done)(\s|@|$)/i.test(msg.text)) {
+    // /add /remove /list /done /cancel ត្រូវបានចាប់ដោយ onText រួចហើយ
+    if (/^\/(add|remove|list|done|cancel)(\s|@|$)/i.test(msg.text)) {
       return;
     }
 
