@@ -1,0 +1,17 @@
+{
+  "name": "telegram-shift-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot សម្រាប់រាប់ចំនួនសារក្នុងវេនការងារនីមួយៗ (Webhook mode សម្រាប់ Render)",
+  "main": "bot.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
