@@ -1,11 +1,11 @@
 require('dotenv').config();
-const fs = require('fs');
-const path = require('path');
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
+const db = require('./db');
 
 const token = process.env.BOT_TOKEN;
 const port = process.env.PORT || 3000;
+const mongoUri = process.env.MONGODB_URI;
 
 // Render ផ្តល់ RENDER_EXTERNAL_URL ស្វ័យប្រវត្តិ (ឧ. https://your-app.onrender.com)
 const externalUrl = process.env.RENDER_EXTERNAL_URL || process.env.WEBHOOK_URL;
@@ -18,36 +18,14 @@ if (!externalUrl) {
   console.error('❌ រកមិនឃើញ URL សាធារណៈទេ (RENDER_EXTERNAL_URL ឬ WEBHOOK_URL)');
   process.exit(1);
 }
+if (!mongoUri) {
+  console.error('❌ សូមកំណត់ MONGODB_URI នៅក្នុង Environment Variables ជាមុនសិន');
+  process.exit(1);
+}
 
 const bot = new TelegramBot(token, { polling: false });
 const app = express();
 app.use(express.json());
-
-// =====================================================
-// ការផ្ទុក Platform ដែលបានចុះឈ្មោះ (persist ជា JSON file)
-// ចំណាំ៖ Render filesystem អាច reset នៅពេល deploy ថ្មី
-// (ដំណើរការធម្មតារវាងសំណើនានា តែមិន survive redeploy ទេ)
-// =====================================================
-const DATA_FILE = path.join(__dirname, 'platforms.json');
-
-function loadPlatforms() {
-  try {
-    const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    return new Set(JSON.parse(raw));
-  } catch (err) {
-    return new Set();
-  }
-}
-
-function savePlatforms(platformSet) {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify([...platformSet]), 'utf8');
-  } catch (err) {
-    console.error('❌ Save platforms.json មិនជោគជ័យ៖', err.message);
-  }
-}
-
-const registeredPlatforms = loadPlatforms();
 
 // Admin ដែលមានសិទ្ធិគ្រប់គ្រង Platform (/remove, /list)
 const ADMIN_IDS = (process.env.ADMIN_IDS || '1908211979')
@@ -61,6 +39,9 @@ function isAdmin(userId) {
 // ទម្រង់ platform name ត្រូវការ៖ អក្សរ (មួយ ឬច្រើន) + លេខ ឧ. e98, wc777, ct777, zs777
 const PLATFORM_NAME_FORMAT = /^[a-zA-Z]+\d+$/;
 
+// Platform ដែលបានចុះឈ្មោះ (ផ្ទុកក្នុង Memory ជា cache, sync ជាមួយ MongoDB)
+let registeredPlatforms = new Set();
+
 // ផ្ទុកសម័យធ្វើការនីមួយៗ តាម chatId + userId
 // { platform, count, active, startedAt }
 const sessions = new Map();
@@ -70,7 +51,7 @@ function getSessionKey(chatId, userId) {
 }
 
 // ----- /add <platform> → ចុះឈ្មោះ Platform ថ្មី -----
-bot.onText(/^\/add(?:@\w+)?\s+(\S+)$/i, (msg, match) => {
+bot.onText(/^\/add(?:@\w+)?\s+(\S+)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const rawName = match[1].toLowerCase().replace(/^\//, '');
 
@@ -84,19 +65,24 @@ bot.onText(/^\/add(?:@\w+)?\s+(\S+)$/i, (msg, match) => {
     return;
   }
 
-  registeredPlatforms.add(rawName);
-  savePlatforms(registeredPlatforms);
+  try {
+    await db.addPlatform(rawName);
+    registeredPlatforms.add(rawName);
 
-  bot.sendMessage(
-    chatId,
-    `✅ បានចុះឈ្មោះ Platform *${rawName.toUpperCase()}* រួចរាល់!\n` +
-      `👉 ឥឡូវប្រើ /${rawName} ដើម្បីចាប់ផ្តើមវេនការងារបាន`,
-    { parse_mode: 'Markdown' }
-  );
+    bot.sendMessage(
+      chatId,
+      `✅ បានចុះឈ្មោះ Platform *${rawName.toUpperCase()}* រួចរាល់!\n` +
+        `👉 ឥឡូវប្រើ /${rawName} ដើម្បីចាប់ផ្តើមវេនការងារបាន`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    console.error('❌ Add platform error:', err.message);
+    bot.sendMessage(chatId, '❌ មានបញ្ហាក្នុងការរក្សាទុក Platform សូមព្យាយាមម្តងទៀត');
+  }
 });
 
 // ----- /remove <platform> → លុប Platform ចេញ (Admin ប៉ុណ្ណោះ) -----
-bot.onText(/^\/remove(?:@\w+)?\s+(\S+)$/i, (msg, match) => {
+bot.onText(/^\/remove(?:@\w+)?\s+(\S+)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
@@ -114,11 +100,16 @@ bot.onText(/^\/remove(?:@\w+)?\s+(\S+)$/i, (msg, match) => {
     return;
   }
 
-  registeredPlatforms.delete(rawName);
-  savePlatforms(registeredPlatforms);
-  bot.sendMessage(chatId, `🗑️ បានលុប Platform *${rawName.toUpperCase()}* ចេញរួចរាល់`, {
-    parse_mode: 'Markdown',
-  });
+  try {
+    await db.removePlatform(rawName);
+    registeredPlatforms.delete(rawName);
+    bot.sendMessage(chatId, `🗑️ បានលុប Platform *${rawName.toUpperCase()}* ចេញរួចរាល់`, {
+      parse_mode: 'Markdown',
+    });
+  } catch (err) {
+    console.error('❌ Remove platform error:', err.message);
+    bot.sendMessage(chatId, '❌ មានបញ្ហាក្នុងការលុប Platform សូមព្យាយាមម្តងទៀត');
+  }
 });
 
 // ----- /list → មើលបញ្ជី Platform ទាំងអស់ (Admin ប៉ុណ្ណោះ) -----
@@ -254,12 +245,24 @@ app.get('/', (req, res) => {
   res.send('🤖 Telegram Shift Bot កំពុងដំណើរការ');
 });
 
-app.listen(port, () => {
-  console.log(`🚀 Server កំពុងស្តាប់នៅ port ${port}`);
+// ----- Startup: ភ្ជាប់ MongoDB → ទាញ Platform → បើក Server → កំណត់ Webhook -----
+async function start() {
+  await db.connect(mongoUri);
+  registeredPlatforms = await db.loadPlatforms();
+  console.log(`📋 ទាញយក Platform ចំនួន ${registeredPlatforms.size} ពី MongoDB`);
 
-  const webhookUrl = `${externalUrl}/bot${token}`;
-  bot
-    .setWebHook(webhookUrl)
-    .then(() => console.log(`✅ Webhook បានកំណត់ជោគជ័យ៖ ${webhookUrl}`))
-    .catch((err) => console.error('❌ កំណត់ Webhook មិនជោគជ័យ៖', err.message));
+  app.listen(port, () => {
+    console.log(`🚀 Server កំពុងស្តាប់នៅ port ${port}`);
+
+    const webhookUrl = `${externalUrl}/bot${token}`;
+    bot
+      .setWebHook(webhookUrl)
+      .then(() => console.log(`✅ Webhook បានកំណត់ជោគជ័យ៖ ${webhookUrl}`))
+      .catch((err) => console.error('❌ កំណត់ Webhook មិនជោគជ័យ៖', err.message));
+  });
+}
+
+start().catch((err) => {
+  console.error('❌ Server ចាប់ផ្តើមមិនជោគជ័យ៖', err.message);
+  process.exit(1);
 });
